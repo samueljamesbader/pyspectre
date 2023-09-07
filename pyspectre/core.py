@@ -66,17 +66,17 @@ def simulate( netlist_path: str, includes: List[str] = None
     raw = raw_path or raw_tmp(net)
     log = f'{net}.log' if not log_path else f'{log_path}'
     if log_path and log_silent:
-        log_option = f'=log {log_path}'
+        log_options = ['=log',f'{log_path}']
     elif log_path and not log_silent:
-        log_option = f'+log {log_path}'
+        log_options = ['+log',f'{log_path}']
     elif (not log_path) and (not log_silent):
-        log_option = '-log'
+        log_options = ['-log']
     else:
         buf        = log_fifo(log)
-        log_option = f'=log {buf}'
+        log_options = ['=log',f'{buf}']
 
     cmd = [ 'spectre', '-64', '-format', 'nutbin', '-raw', f'{raw}'
-          ] + [log_option] + inc + [net]
+          ] + log_options + inc + [net]
 
     if not os.path.isfile(net):
         raise(FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), net))
@@ -145,7 +145,7 @@ def start_session( net_path: str, includes: List[str] = None
     inc    = [] if not includes else [f'-I{os.path.expanduser(i)}' for i in includes]
     cmd    = 'spectre'
     args   = [ '-64', '+interactive', '-format', 'nutbin', '-raw', f'{raw}'
-             , f'=log {log}'] + inc + [net]
+             , '=log', f'{log}'] + inc + [net]
 
     if not os.path.isfile(net):
         raise(FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), net))
