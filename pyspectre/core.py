@@ -131,7 +131,7 @@ class Session:
     offset  : int
 
 def start_session( net_path: str, includes: List[str] = None
-                 , raw_path: str = None)-> Session:
+                 , raw_path: str = None, timeout: int = 120)-> Session:
     """
     Start spectre interactive session
     """
@@ -152,7 +152,7 @@ def start_session( net_path: str, includes: List[str] = None
     if not os.access(net, os.R_OK):
         raise(PermissionError(errno.EACCES, os.strerror(errno.EACCES), net))
 
-    repl   = pexpect.spawn(cmd, args, timeout = 120)
+    repl   = pexpect.spawn(cmd, args, timeout = timeout)
     repl.delaybeforesend = 0.001
     repl.delayafterread  = 0.001
 
