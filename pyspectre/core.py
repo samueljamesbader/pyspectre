@@ -136,9 +136,9 @@ def start_session( net_path: str, includes: List[str] = None
     Start spectre interactive session
     """
     offset = 0
-    prompt = '\r\n>\s'
-    succ   = '.*\nt'
-    fail   = '.*\nnil'
+    prompt = r'\r\n>\s'
+    succ   = r'.*\nt'
+    fail   = r'.*\nnil'
     net    = os.path.expanduser(net_path)
     raw    = raw_path or raw_tmp(net)
     log    = log_fifo(os.path.splitext(raw)[0])
