@@ -3,15 +3,20 @@
 import os
 import re
 from   subprocess      import run, DEVNULL, Popen
-from   tempfile        import NamedTemporaryFile
+from   tempfile        import NamedTemporaryFile, TemporaryDirectory
 import errno
 import warnings
 from   typing          import NamedTuple, NewType, List, Dict, Iterable
+from   pathlib         import Path
 
 from   dataclasses     import dataclass
 import pexpect
 from   pandas          import DataFrame
 from   pynut           import read_raw, plot_dict
+
+# For psfascii format
+from   psf_utils       import PSF
+from   pandas          import DataFrame
 
 def netlist_to_tmp(netlist: str) -> str:
     """
@@ -23,15 +28,16 @@ def netlist_to_tmp(netlist: str) -> str:
     tmp.close()
     return path
 
-def raw_tmp(net_path: str) -> str:
+def raw_tmp(net_path: str, folder: bool = False) -> str:
     """
     Raw simulation results in /tmp
     """
     pre  = f'{os.path.splitext(os.path.basename(net_path))[0]}'
-    suf  = '.raw'
-    tmp  = NamedTemporaryFile(prefix = pre, suffix = suf, delete = False)
+    suf  = ('folder' if folder else '')+'.raw'
+    tmp = (TemporaryDirectory if folder else NamedTemporaryFile)\
+        (prefix = pre, suffix = suf, delete = False)
     path = tmp.name
-    tmp.close()
+    if not folder: tmp.close()
     return path
 
 def log_fifo(log_path: str) -> str:
@@ -44,26 +50,52 @@ def log_fifo(log_path: str) -> str:
     Popen(f'cat {path} > /dev/null 2>&1 &', shell=True)
     return path
 
-def read_results(raw_file: str, offset: int = 0) -> Dict[str, DataFrame]:
+def read_psfascii(folder: str):
+    psf_data={}
+    for psf_file in Path(folder).iterdir():
+        with open(psf_file,'r') as f:
+            valid_file=False
+            for l in f:
+                if "analysis type" in l:
+                    valid_file=any(valid_analysis in l
+                                   for valid_analysis in ["tran","dc","ac"])
+        if valid_file:
+            psf=PSF(psf_file)
+            psf_data[psf.meta['analysis description']]=\
+                DataFrame(dict(**{psf.get_sweep().name:psf.get_sweep().abscissa},
+                    **{sig.name:sig.ordinate for sig in psf.all_signals()}))
+    return psf_data
+
+def read_results(raw_file: str, offset: int = 0, format='nutbin') -> Dict[str, DataFrame]:
     """
     Read simulation results
     """
-    if not os.path.isfile(raw_file):
+    output_is_folder=(format=='psfascii')
+    if not (os.path.isdir(raw_file) if output_is_folder else os.path.isfile(raw_file)):
         raise(FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), raw_file))
     if not os.access(raw_file, os.R_OK):
         raise(PermissionError(errno.EACCES, os.strerror(errno.EACCES), raw_file))
 
-    return plot_dict(read_raw(raw_file, off_set = offset))
+    match format:
+        case 'nutbin':
+            return plot_dict(read_raw(raw_file, off_set = offset))
+        case 'psfascii':
+            if offset!=0: raise NotImplementedError("Offset not implemented for psfascii format")
+            return read_psfascii(folder=raw_file)
+        case _:
+            raise NotImplementedError(f"Unrecognized format {format}")
 
 def simulate( netlist_path: str, includes: List[str] = None
-            , raw_path: str = None, log_path: str = None , log_silent = True
+            , raw_path: str = None, log_path: str = None , log_silent = True,
+            format = 'nutbin'
             ) -> Dict[str, DataFrame]:
     """
     Passes the given netlist path to spectre and reads the results in.
     """
+    output_is_folder=(format=='psfascii')
     net = os.path.expanduser(netlist_path)
     inc = [f'-I{os.path.expanduser(i)}' for i in includes] if includes else []
-    raw = raw_path or raw_tmp(net)
+    raw = raw_path or raw_tmp(net,folder=output_is_folder)
     log = f'{net}.log' if not log_path else f'{log_path}'
     if log_path and log_silent:
         log_options = ['=log',f'{log_path}']
@@ -75,7 +107,8 @@ def simulate( netlist_path: str, includes: List[str] = None
         buf        = log_fifo(log)
         log_options = ['=log',f'{buf}']
 
-    cmd = [ 'spectre', '-64', '-format', 'nutbin', '-raw', f'{raw}'
+    assert format in ['nutbin','psfascii'], f"Unrecognized format {format}"
+    cmd = [ 'spectre', '-64', '-format', format, '-raw', f'{raw}'
           ] + log_options + inc + [net]
 
     if not os.path.isfile(net):
@@ -100,12 +133,12 @@ def simulate( netlist_path: str, includes: List[str] = None
             raise(IOError( errno.EIO, os.strerror(errno.EIO)
                          , f'spectre returned with non-zero exit code: {ret}'
                          , ))
-    if not os.path.isfile(raw):
+    if not (os.path.isdir(raw) if output_is_folder else os.path.isfile(raw)):
         raise(FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), raw))
     if not os.access(raw, os.R_OK):
         raise(PermissionError(errno.EACCES, os.strerror(errno.EACCES), raw))
 
-    return {n: p for n, p in read_results(raw).items() if n != 'offset'}
+    return {n: p for n, p in read_results(raw, format=format).items() if n != 'offset'}
 
 def simulate_netlist(netlist: str, **kwargs) -> Dict[str, DataFrame]:
     """
