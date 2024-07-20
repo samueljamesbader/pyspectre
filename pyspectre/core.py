@@ -10,13 +10,22 @@ from   typing          import NamedTuple, NewType, List, Dict, Iterable
 from   pathlib         import Path
 
 from   dataclasses     import dataclass
+
+import pandas as pd
 import pexpect
-from   pandas          import DataFrame
+
+# For nutbin format
 from   pynut           import read_raw, plot_dict
 
 # For psfascii format
+from   pandas          import DataFrame
 from   psf_utils       import PSF
 from   pandas          import DataFrame
+
+
+# This list is only the ones that have been tested.
+# Likely many more work and just need to be included
+psf_supported_analyses=['.tran','.dc','.ac','.sp','.noise']
 
 def netlist_to_tmp(netlist: str) -> str:
     """
@@ -44,7 +53,7 @@ def log_fifo(log_path: str) -> str:
     """
     Create fifo buffer for spectre log file
     """
-    path  = f'{log_path}.log'
+    path  = f'{log_path}'
     mode = 0o600
     os.mkfifo(path, mode)
     Popen(f'cat {path} > /dev/null 2>&1 &', shell=True)
@@ -53,17 +62,26 @@ def log_fifo(log_path: str) -> str:
 def read_psfascii(folder: str):
     psf_data={}
     for psf_file in Path(folder).iterdir():
-        with open(psf_file,'r') as f:
-            valid_file=False
-            for l in f:
-                if "analysis type" in l:
-                    valid_file=any(valid_analysis in l
-                                   for valid_analysis in ["tran","dc","ac"])
-        if valid_file:
+        if psf_file.suffix in psf_supported_analyses:
             psf=PSF(psf_file)
-            psf_data[psf.meta['analysis description']]=\
+            df= DataFrame(dict(**{sig.name:[sig.ordinate] for sig in psf.all_signals()}))\
+                    if psf.get_sweep() is None else \
                 DataFrame(dict(**{psf.get_sweep().name:psf.get_sweep().abscissa},
-                    **{sig.name:sig.ordinate for sig in psf.all_signals()}))
+                               **{sig.name:sig.ordinate for sig in psf.all_signals()}))
+            aname=psf.meta['analysis description']
+
+            if aname not in psf_data:
+                psf_data[aname]=df
+            else:
+                assert len(psf_data[aname])==len(df)
+                if psf.get_sweep() is None:
+                    psf_data[aname]=pd.concat([psf_data[aname],df],axis=1)
+                else:
+                    # Could also check for equality of the sweep variable to be sure...
+                    psf_data[aname]=pd.concat([psf_data[aname],df.drop(columns=[psf.get_sweep().name])],axis=1)
+
+    if not len(psf_data.keys()):
+        raise Exception("No supported analysis results")
     return psf_data
 
 def read_results(raw_file: str, offset: int = 0, format='nutbin') -> Dict[str, DataFrame]:
@@ -87,7 +105,7 @@ def read_results(raw_file: str, offset: int = 0, format='nutbin') -> Dict[str, D
 
 def simulate( netlist_path: str, includes: List[str] = None
             , raw_path: str = None, log_path: str = None , log_silent = True,
-            format = 'nutbin'
+            format = 'nutbin', keep_log=False
             ) -> Dict[str, DataFrame]:
     """
     Passes the given netlist path to spectre and reads the results in.
@@ -104,7 +122,7 @@ def simulate( netlist_path: str, includes: List[str] = None
     elif (not log_path) and (not log_silent):
         log_options = ['-log']
     else:
-        buf        = log_fifo(log)
+        buf        = log if keep_log else log_fifo(log)
         log_options = ['=log',f'{buf}']
 
     assert format in ['nutbin','psfascii'], f"Unrecognized format {format}"
@@ -162,22 +180,26 @@ class Session:
     succ    : str
     fail    : str
     offset  : int
+    format  : str
 
 def start_session( net_path: str, includes: List[str] = None
-                 , raw_path: str = None, timeout: int = 120)-> Session:
+                 , raw_path: str = None, timeout: int = 120,
+                   format='nutbin', keep_log: bool = False)-> Session:
     """
     Start spectre interactive session
     """
+    output_is_folder=(format=='psfascii')
     offset = 0
     prompt = r'\r\n>\s'
     succ   = r'.*\nt'
     fail   = r'.*\nnil'
     net    = os.path.expanduser(net_path)
-    raw    = raw_path or raw_tmp(net)
-    log    = log_fifo(os.path.splitext(raw)[0])
+    raw    = raw_path or raw_tmp(net,folder=output_is_folder)
+    log    = os.path.splitext(raw)[0]+".log"
+    log    = log if keep_log else log_fifo(log)
     inc    = [] if not includes else [f'-I{os.path.expanduser(i)}' for i in includes]
     cmd    = 'spectre'
-    args   = [ '-64', '+interactive', '-format', 'nutbin', '-raw', f'{raw}'
+    args   = [ '-64', '+interactive', '-format', format,  '-raw', f'{raw}'
              , '=log', f'{log}'] + inc + [net]
 
     if not os.path.isfile(net):
@@ -192,7 +214,7 @@ def start_session( net_path: str, includes: List[str] = None
     if repl.expect(prompt) != 0:
         raise(IOError(errno.EIO, os.strerror(errno.EIO), cmd))
 
-    return Session(net_path, raw, repl, prompt, succ, fail, offset)
+    return Session(net_path, raw, repl, prompt, succ, fail, offset, format=format)
 
 
 def run_command(session: Session, command: str) -> bool:
@@ -213,7 +235,7 @@ def run_all(session: Session) -> Dict[str, DataFrame]:
     Run all simulation analyses
     """
     run_command(session, '(sclRun "all")')
-    res = read_results(session.raw_file, offset = session.offset)
+    res = read_results(session.raw_file, offset = session.offset, format=session.format)
     session.offset = res.get('offset', 0)
     return {n: p for n,p in res.items() if n != 'offset'}
 
